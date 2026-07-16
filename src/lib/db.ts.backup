@@ -1,0 +1,476 @@
+import Database from 'better-sqlite3';
+import path from 'path';
+
+const dbPath = path.join(process.cwd(), 'dashup.db');
+const db = new Database(dbPath);
+
+// Enable foreign keys
+db.pragma('foreign_keys = ON');
+
+// Initialize database schema
+db.exec(`
+  CREATE TABLE IF NOT EXISTS team_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_member_id INTEGER NOT NULL,
+    blocked_by_text TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (team_member_id) REFERENCES team_members(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS submission_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    UNIQUE(submission_id, project_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS submission_talk_to (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL,
+    team_member_id INTEGER NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'green' CHECK(priority IN ('red', 'amber', 'green')),
+    FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE,
+    FOREIGN KEY (team_member_id) REFERENCES team_members(id) ON DELETE CASCADE,
+    UNIQUE(submission_id, team_member_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
+
+// Add priority column if it doesn't exist (migration for existing databases)
+try {
+  db.exec(`ALTER TABLE submission_talk_to ADD COLUMN priority TEXT NOT NULL DEFAULT 'green' CHECK(priority IN ('red', 'amber', 'green'))`);
+} catch {
+  // Column already exists
+}
+
+// Initialize default settings if not exist
+try {
+  db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('logo_url', '');
+  db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('landing_image_url', '');
+} catch {
+  // Settings already exist
+}
+
+export default db;
+
+// Type definitions
+export interface TeamMember {
+  id: number;
+  name: string;
+  created_at: string;
+}
+
+export interface Project {
+  id: number;
+  name: string;
+  created_at: string;
+}
+
+export interface Submission {
+  id: number;
+  team_member_id: number;
+  blocked_by_text: string | null;
+  created_at: string;
+}
+
+export interface SubmissionWithDetails extends Submission {
+  team_member_name: string;
+  projects: Project[];
+  talk_to: TeamMember[];
+}
+
+// Database operations
+export const teamMemberOps = {
+  getAll: () => db.prepare('SELECT * FROM team_members ORDER BY name').all() as TeamMember[],
+  
+  getById: (id: number) => db.prepare('SELECT * FROM team_members WHERE id = ?').get(id) as TeamMember | undefined,
+  
+  create: (name: string) => {
+    const stmt = db.prepare('INSERT INTO team_members (name) VALUES (?)');
+    const result = stmt.run(name);
+    return { id: result.lastInsertRowid as number, name, created_at: new Date().toISOString() };
+  },
+  
+  update: (id: number, name: string) => {
+    const stmt = db.prepare('UPDATE team_members SET name = ? WHERE id = ?');
+    stmt.run(name, id);
+    return { id, name };
+  },
+  
+  delete: (id: number) => {
+    const stmt = db.prepare('DELETE FROM team_members WHERE id = ?');
+    return stmt.run(id);
+  }
+};
+
+export const projectOps = {
+  getAll: () => db.prepare('SELECT * FROM projects ORDER BY name').all() as Project[],
+  
+  getById: (id: number) => db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as Project | undefined,
+  
+  create: (name: string) => {
+    const stmt = db.prepare('INSERT INTO projects (name) VALUES (?)');
+    const result = stmt.run(name);
+    return { id: result.lastInsertRowid as number, name, created_at: new Date().toISOString() };
+  },
+  
+  update: (id: number, name: string) => {
+    const stmt = db.prepare('UPDATE projects SET name = ? WHERE id = ?');
+    stmt.run(name, id);
+    return { id, name };
+  },
+  
+  delete: (id: number) => {
+    const stmt = db.prepare('DELETE FROM projects WHERE id = ?');
+    return stmt.run(id);
+  }
+};
+
+export const submissionOps = {
+  create: (teamMemberId: number, blockedByText: string | null, projectIds: number[], talkToRequests: { memberId: number; priority: string }[]) => {
+    const insertSubmission = db.prepare(
+      'INSERT INTO submissions (team_member_id, blocked_by_text) VALUES (?, ?)'
+    );
+    const insertProject = db.prepare(
+      'INSERT INTO submission_projects (submission_id, project_id) VALUES (?, ?)'
+    );
+    const insertTalkTo = db.prepare(
+      'INSERT INTO submission_talk_to (submission_id, team_member_id, priority) VALUES (?, ?, ?)'
+    );
+
+    const transaction = db.transaction(() => {
+      const result = insertSubmission.run(teamMemberId, blockedByText || null);
+      const submissionId = result.lastInsertRowid as number;
+
+      for (const projectId of projectIds) {
+        insertProject.run(submissionId, projectId);
+      }
+
+      for (const talkTo of talkToRequests) {
+        insertTalkTo.run(submissionId, talkTo.memberId, talkTo.priority);
+      }
+
+      return submissionId;
+    });
+
+    return transaction();
+  },
+
+  getTodaySubmissions: (): SubmissionWithDetails[] => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    const submissions = db.prepare(`
+      SELECT s.*, tm.name as team_member_name
+      FROM submissions s
+      JOIN team_members tm ON s.team_member_id = tm.id
+      WHERE date(s.created_at) = date(?)
+      ORDER BY s.created_at DESC
+    `).all(today) as (Submission & { team_member_name: string })[];
+
+    const getProjects = db.prepare(`
+      SELECT p.* FROM projects p
+      JOIN submission_projects sp ON p.id = sp.project_id
+      WHERE sp.submission_id = ?
+    `);
+
+    const getTalkTo = db.prepare(`
+      SELECT tm.* FROM team_members tm
+      JOIN submission_talk_to st ON tm.id = st.team_member_id
+      WHERE st.submission_id = ?
+    `);
+
+    return submissions.map(sub => ({
+      ...sub,
+      projects: getProjects.all(sub.id) as Project[],
+      talk_to: getTalkTo.all(sub.id) as TeamMember[]
+    }));
+  },
+
+  getTodaySubmissionForMember: (teamMemberId: number) => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    const submission = db.prepare(`
+      SELECT s.*, tm.name as team_member_name
+      FROM submissions s
+      JOIN team_members tm ON s.team_member_id = tm.id
+      WHERE s.team_member_id = ? AND date(s.created_at) = date(?)
+      ORDER BY s.created_at DESC
+      LIMIT 1
+    `).get(teamMemberId, today) as (Submission & { team_member_name: string }) | undefined;
+
+    if (!submission) return null;
+
+    const projects = db.prepare(`
+      SELECT p.id, p.name FROM projects p
+      JOIN submission_projects sp ON p.id = sp.project_id
+      WHERE sp.submission_id = ?
+    `).all(submission.id) as { id: number; name: string }[];
+
+    const talkTo = db.prepare(`
+      SELECT tm.id, tm.name, st.priority
+      FROM team_members tm
+      JOIN submission_talk_to st ON tm.id = st.team_member_id
+      WHERE st.submission_id = ?
+    `).all(submission.id) as { id: number; name: string; priority: string }[];
+
+    return {
+      ...submission,
+      projects,
+      talkTo
+    };
+  },
+
+  updateSubmission: (submissionId: number, blockedByText: string | null, projectIds: number[], talkToRequests: { memberId: number; priority: string }[]) => {
+    const updateSubmission = db.prepare(
+      'UPDATE submissions SET blocked_by_text = ? WHERE id = ?'
+    );
+    const deleteProjects = db.prepare(
+      'DELETE FROM submission_projects WHERE submission_id = ?'
+    );
+    const deleteTalkTo = db.prepare(
+      'DELETE FROM submission_talk_to WHERE submission_id = ?'
+    );
+    const insertProject = db.prepare(
+      'INSERT INTO submission_projects (submission_id, project_id) VALUES (?, ?)'
+    );
+    const insertTalkTo = db.prepare(
+      'INSERT INTO submission_talk_to (submission_id, team_member_id, priority) VALUES (?, ?, ?)'
+    );
+
+    const transaction = db.transaction(() => {
+      updateSubmission.run(blockedByText || null, submissionId);
+      deleteProjects.run(submissionId);
+      deleteTalkTo.run(submissionId);
+
+      for (const projectId of projectIds) {
+        insertProject.run(submissionId, projectId);
+      }
+
+      for (const talkTo of talkToRequests) {
+        insertTalkTo.run(submissionId, talkTo.memberId, talkTo.priority);
+      }
+
+      return submissionId;
+    });
+
+    return transaction();
+  },
+
+  getProjectCounts: () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    return db.prepare(`
+      SELECT 
+        p.id, 
+        p.name, 
+        COUNT(sp.id) as count,
+        COALESCE(GROUP_CONCAT(DISTINCT tm.name), '') as member_names
+      FROM projects p
+      LEFT JOIN submission_projects sp ON p.id = sp.project_id
+      LEFT JOIN submissions s ON sp.submission_id = s.id AND date(s.created_at) = date(?)
+      LEFT JOIN team_members tm ON s.team_member_id = tm.id
+      GROUP BY p.id, p.name
+      ORDER BY count DESC
+    `).all(today) as { id: number; name: string; count: number; member_names: string }[];
+  },
+
+  getMembersPerProject: () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    return db.prepare(`
+      SELECT 
+        p.id, 
+        p.name, 
+        COUNT(DISTINCT s.team_member_id) as member_count,
+        COALESCE(GROUP_CONCAT(DISTINCT tm.name), '') as member_names
+      FROM projects p
+      LEFT JOIN submission_projects sp ON p.id = sp.project_id
+      LEFT JOIN submissions s ON sp.submission_id = s.id AND date(s.created_at) = date(?)
+      LEFT JOIN team_members tm ON s.team_member_id = tm.id
+      GROUP BY p.id, p.name
+      ORDER BY member_count DESC
+    `).all(today) as { id: number; name: string; member_count: number; member_names: string }[];
+  },
+
+  getContextSwitchMinutes: () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    const result = db.prepare(`
+      SELECT SUM(
+        CASE 
+          WHEN project_count > 1 THEN (project_count - 1) * 23
+          ELSE 0
+        END
+      ) as total_minutes
+      FROM (
+        SELECT s.id, COUNT(sp.project_id) as project_count
+        FROM submissions s
+        LEFT JOIN submission_projects sp ON s.id = sp.submission_id
+        WHERE date(s.created_at) = date(?)
+        GROUP BY s.id
+      )
+    `).get(today) as { total_minutes: number | null };
+    
+    return result.total_minutes || 0;
+  },
+
+  getTalkToList: () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    return db.prepare(`
+      SELECT 
+        tm_from.name as from_name,
+        tm_to.name as to_name,
+        st.priority
+      FROM submission_talk_to st
+      JOIN submissions s ON st.submission_id = s.id
+      JOIN team_members tm_from ON s.team_member_id = tm_from.id
+      JOIN team_members tm_to ON st.team_member_id = tm_to.id
+      WHERE date(s.created_at) = date(?)
+      ORDER BY 
+        CASE st.priority 
+          WHEN 'red' THEN 1 
+          WHEN 'amber' THEN 2 
+          WHEN 'green' THEN 3 
+        END,
+        tm_from.name, 
+        tm_to.name
+    `).all(today) as { from_name: string; to_name: string; priority: string }[];
+  },
+
+  getBlockers: () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    return db.prepare(`
+      SELECT tm.name as team_member_name, s.blocked_by_text
+      FROM submissions s
+      JOIN team_members tm ON s.team_member_id = tm.id
+      WHERE date(s.created_at) = date(?)
+        AND s.blocked_by_text IS NOT NULL
+        AND s.blocked_by_text != ''
+      ORDER BY s.created_at DESC
+    `).all(today) as { team_member_name: string; blocked_by_text: string }[];
+  },
+
+  getCollaborationOpportunities: () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    // Find pairs of team members who share multiple projects
+    // This identifies opportunities where they could coordinate to reduce context switching
+    const overlaps = db.prepare(`
+      WITH member_projects AS (
+        SELECT DISTINCT 
+          tm.id as member_id,
+          tm.name as member_name,
+          p.id as project_id,
+          p.name as project_name
+        FROM submissions s
+        JOIN team_members tm ON s.team_member_id = tm.id
+        JOIN submission_projects sp ON s.id = sp.submission_id
+        JOIN projects p ON sp.project_id = p.id
+        WHERE date(s.created_at) = date(?)
+      ),
+      member_overlap_pairs AS (
+        SELECT 
+          mp1.member_id as member1_id,
+          mp1.member_name as member1_name,
+          mp2.member_id as member2_id,
+          mp2.member_name as member2_name,
+          mp1.project_id,
+          mp1.project_name
+        FROM member_projects mp1
+        JOIN member_projects mp2 ON mp1.project_id = mp2.project_id
+        WHERE mp1.member_id < mp2.member_id
+      )
+      SELECT 
+        member1_name,
+        member2_name,
+        GROUP_CONCAT(project_name, ', ') as shared_projects,
+        COUNT(*) as shared_count
+      FROM member_overlap_pairs
+      GROUP BY member1_id, member2_id
+      HAVING shared_count >= 2
+      ORDER BY shared_count DESC
+    `).all(today) as { 
+      member1_name: string; 
+      member2_name: string; 
+      shared_projects: string; 
+      shared_count: number; 
+    }[];
+
+    // Also get individual team member project counts to calculate potential time savings
+    const memberProjectCounts = db.prepare(`
+      SELECT 
+        tm.name as member_name,
+        COUNT(DISTINCT sp.project_id) as project_count
+      FROM submissions s
+      JOIN team_members tm ON s.team_member_id = tm.id
+      JOIN submission_projects sp ON s.id = sp.submission_id
+      WHERE date(s.created_at) = date(?)
+      GROUP BY tm.id
+      HAVING project_count >= 2
+      ORDER BY project_count DESC
+    `).all(today) as { member_name: string; project_count: number }[];
+
+    return {
+      overlaps,
+      memberProjectCounts
+    };
+  }
+};
+
+export const settingsOps = {
+  get: (key: string): string | null => {
+    const result = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return result?.value ?? null;
+  },
+
+  getAll: (): { logo_url: string; landing_image_url: string } => {
+    const settings = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
+    const result: { logo_url: string; landing_image_url: string } = {
+      logo_url: '',
+      landing_image_url: ''
+    };
+    for (const s of settings) {
+      if (s.key === 'logo_url' || s.key === 'landing_image_url') {
+        result[s.key] = s.value;
+      }
+    }
+    return result;
+  },
+
+  set: (key: string, value: string) => {
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
+  },
+
+  update: (settings: { logo_url?: string; landing_image_url?: string }) => {
+    const updateStmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+    const transaction = db.transaction(() => {
+      if (settings.logo_url !== undefined) {
+        updateStmt.run('logo_url', settings.logo_url);
+      }
+      if (settings.landing_image_url !== undefined) {
+        updateStmt.run('landing_image_url', settings.landing_image_url);
+      }
+    });
+    transaction();
+  }
+};
