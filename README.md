@@ -4,9 +4,10 @@
 
 ## Features
 
+- **� Magic Link Authentication**: Passwordless email-based login
 - **📝 Quick Entry Form** (`/submit`): Three simple questions - projects, blockers, and sync needs
 - **📊 Live Dashboard** (`/dashboard`): Real-time updates with charts and metrics
-- **⚙️ Admin Panel** (`/admin`): Manage team members and projects
+- **⚙️ Admin Panel** (`/admin`): Manage team members, projects, and allowed email domains
 - **⏱️ Context Switch Tracking**: Automatically calculates time lost (23 min per switch)
 - **🔄 Real-time Updates**: Dashboard polls every 5 seconds for live data
 
@@ -27,20 +28,54 @@ npm install
 # Approve native module scripts (required for SQLite)
 npm approve-scripts better-sqlite3
 
+# Set up environment variables
+cp .env.example .env.local
+# Edit .env.local to set DASHUP_MASTER_PASSWORD
+
 # Start development server
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to see the app.
 
+## Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `DASHUP_MASTER_PASSWORD` | Master password for accessing /admin settings page | Yes |
+| `NEXT_PUBLIC_BASE_URL` | Base URL for magic links (e.g., https://dashup.example.com) | Production only |
+| `MYSQL_HOST` | MySQL host (if using MySQL instead of SQLite) | No |
+| `MYSQL_PORT` | MySQL port (default: 3306) | No |
+| `MYSQL_USER` | MySQL username | No |
+| `MYSQL_PASSWORD` | MySQL password | No |
+| `MYSQL_DATABASE` | MySQL database name | No |
+
+## Authentication
+
+DashUp uses magic link authentication:
+
+1. **Email Login**: Users enter their email on the landing page
+2. **Domain Validation**: Email domain must be in the allowed list (configured in /admin)
+3. **Magic Link**: A secure login link is sent (in development, shown in console)
+4. **Registration**: First-time users are prompted to enter their name
+5. **Sessions**: Login sessions last 7 days
+
+### Setting Up Authentication
+
+1. Set `DASHUP_MASTER_PASSWORD` in your environment
+2. Go to `/admin` and enter the master password
+3. Add allowed email domains (e.g., `company.com`)
+4. Users can now sign in with emails from those domains
+
 ## Routes
 
 | Route | Description |
 |-------|-------------|
-| `/` | Landing page with navigation |
-| `/admin` | CRUD interface for team members and projects |
+| `/` | Landing page with email login |
+| `/admin` | Settings (requires master password) |
 | `/submit` | Daily standup entry form |
 | `/dashboard` | Real-time visualization dashboard |
+| `/auth/register` | New user registration (after magic link) |
 
 ## Getting Started
 

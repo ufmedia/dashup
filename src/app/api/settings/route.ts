@@ -14,9 +14,13 @@ export async function GET() {
 export async function PUT(request: Request) {
   try {
     const body = await request.json();
-    const { logo_url, landing_image_url } = body;
+    const { logo_url, landing_image_url, allowed_email_domains } = body;
 
-    await settingsOps.update({ logo_url, landing_image_url });
+    await settingsOps.update({ 
+      logo_url, 
+      landing_image_url,
+      allowed_email_domains 
+    });
     
     return NextResponse.json({ success: true });
   } catch (error) {

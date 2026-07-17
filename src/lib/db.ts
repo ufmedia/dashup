@@ -28,6 +28,31 @@ export interface SubmissionWithDetails extends Submission {
   talk_to: TeamMember[];
 }
 
+export interface User {
+  id: number;
+  email: string;
+  name: string | null;
+  team_member_id: number | null;
+  created_at: string;
+}
+
+export interface MagicToken {
+  id: number;
+  email: string;
+  token_hash: string;
+  expires_at: string;
+  used: number;
+  created_at: string;
+}
+
+export interface Session {
+  id: number;
+  user_id: number;
+  token_hash: string;
+  expires_at: string;
+  created_at: string;
+}
+
 // Detect which database to use
 const useMySQL = !!process.env.MYSQL_HOST;
 
@@ -85,12 +110,40 @@ function getSqliteDb(): Database.Database {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT,
+        team_member_id INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (team_member_id) REFERENCES team_members(id) ON DELETE SET NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS magic_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at DATETIME NOT NULL,
+        used INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
     `);
 
     // Initialize default settings
     try {
       sqliteDb.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('logo_url', '');
       sqliteDb.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('landing_image_url', '');
+      sqliteDb.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('allowed_email_domains', '[]');
     } catch {
       // Settings already exist
     }
@@ -177,12 +230,48 @@ async function initMysqlSchema(): Promise<void> {
     )
   `);
 
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      name VARCHAR(255),
+      team_member_id INT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (team_member_id) REFERENCES team_members(id) ON DELETE SET NULL
+    )
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS magic_tokens (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(255) NOT NULL,
+      token_hash VARCHAR(64) NOT NULL UNIQUE,
+      expires_at TIMESTAMP NOT NULL,
+      used TINYINT DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      token_hash VARCHAR(64) NOT NULL UNIQUE,
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
   // Initialize default settings
   await pool.execute(`
     INSERT IGNORE INTO settings (\`key\`, value) VALUES ('logo_url', '')
   `);
   await pool.execute(`
     INSERT IGNORE INTO settings (\`key\`, value) VALUES ('landing_image_url', '')
+  `);
+  await pool.execute(`
+    INSERT IGNORE INTO settings (\`key\`, value) VALUES ('allowed_email_domains', '[]')
   `);
 }
 
@@ -912,30 +1001,44 @@ export const settingsOps = {
     }
   },
 
-  getAll: async (): Promise<{ logo_url: string; landing_image_url: string }> => {
+  getAll: async (): Promise<{ logo_url: string; landing_image_url: string; allowed_email_domains: string[] }> => {
     if (useMySQL) {
       await ensureMysqlInit();
       const [rows] = await getMysqlPool().execute('SELECT `key`, value FROM settings');
       const settings = rows as { key: string; value: string }[];
-      const result: { logo_url: string; landing_image_url: string } = {
+      const result: { logo_url: string; landing_image_url: string; allowed_email_domains: string[] } = {
         logo_url: '',
-        landing_image_url: ''
+        landing_image_url: '',
+        allowed_email_domains: []
       };
       for (const s of settings) {
         if (s.key === 'logo_url' || s.key === 'landing_image_url') {
           result[s.key] = s.value;
+        } else if (s.key === 'allowed_email_domains') {
+          try {
+            result.allowed_email_domains = JSON.parse(s.value);
+          } catch {
+            result.allowed_email_domains = [];
+          }
         }
       }
       return result;
     } else {
       const settings = getSqliteDb().prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
-      const result: { logo_url: string; landing_image_url: string } = {
+      const result: { logo_url: string; landing_image_url: string; allowed_email_domains: string[] } = {
         logo_url: '',
-        landing_image_url: ''
+        landing_image_url: '',
+        allowed_email_domains: []
       };
       for (const s of settings) {
         if (s.key === 'logo_url' || s.key === 'landing_image_url') {
           result[s.key] = s.value;
+        } else if (s.key === 'allowed_email_domains') {
+          try {
+            result.allowed_email_domains = JSON.parse(s.value);
+          } catch {
+            result.allowed_email_domains = [];
+          }
         }
       }
       return result;
@@ -954,7 +1057,7 @@ export const settingsOps = {
     }
   },
 
-  update: async (settings: { logo_url?: string; landing_image_url?: string }): Promise<void> => {
+  update: async (settings: { logo_url?: string; landing_image_url?: string; allowed_email_domains?: string[] }): Promise<void> => {
     if (useMySQL) {
       await ensureMysqlInit();
       const pool = getMysqlPool();
@@ -970,6 +1073,13 @@ export const settingsOps = {
           ['landing_image_url', settings.landing_image_url, settings.landing_image_url]
         );
       }
+      if (settings.allowed_email_domains !== undefined) {
+        const domainsJson = JSON.stringify(settings.allowed_email_domains);
+        await pool.execute(
+          'INSERT INTO settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = ?',
+          ['allowed_email_domains', domainsJson, domainsJson]
+        );
+      }
     } else {
       const db = getSqliteDb();
       const updateStmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
@@ -980,8 +1090,218 @@ export const settingsOps = {
         if (settings.landing_image_url !== undefined) {
           updateStmt.run('landing_image_url', settings.landing_image_url);
         }
+        if (settings.allowed_email_domains !== undefined) {
+          updateStmt.run('allowed_email_domains', JSON.stringify(settings.allowed_email_domains));
+        }
       });
       transaction();
+    }
+  }
+};
+
+// Database operations - Users
+export const userOps = {
+  getByEmail: async (email: string): Promise<User | undefined> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      const [rows] = await getMysqlPool().execute('SELECT * FROM users WHERE email = ?', [email.toLowerCase()]);
+      return (rows as User[])[0];
+    } else {
+      return getSqliteDb().prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase()) as User | undefined;
+    }
+  },
+
+  getById: async (id: number): Promise<User | undefined> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      const [rows] = await getMysqlPool().execute('SELECT * FROM users WHERE id = ?', [id]);
+      return (rows as User[])[0];
+    } else {
+      return getSqliteDb().prepare('SELECT * FROM users WHERE id = ?').get(id) as User | undefined;
+    }
+  },
+
+  create: async (email: string): Promise<User> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      const [result] = await getMysqlPool().execute('INSERT INTO users (email) VALUES (?)', [email.toLowerCase()]);
+      const insertResult = result as mysql.ResultSetHeader;
+      return { id: insertResult.insertId, email: email.toLowerCase(), name: null, team_member_id: null, created_at: new Date().toISOString() };
+    } else {
+      const stmt = getSqliteDb().prepare('INSERT INTO users (email) VALUES (?)');
+      const result = stmt.run(email.toLowerCase());
+      return { id: result.lastInsertRowid as number, email: email.toLowerCase(), name: null, team_member_id: null, created_at: new Date().toISOString() };
+    }
+  },
+
+  updateName: async (id: number, name: string): Promise<void> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      await getMysqlPool().execute('UPDATE users SET name = ? WHERE id = ?', [name, id]);
+    } else {
+      getSqliteDb().prepare('UPDATE users SET name = ? WHERE id = ?').run(name, id);
+    }
+  },
+
+  linkTeamMember: async (userId: number, teamMemberId: number): Promise<void> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      await getMysqlPool().execute('UPDATE users SET team_member_id = ? WHERE id = ?', [teamMemberId, userId]);
+    } else {
+      getSqliteDb().prepare('UPDATE users SET team_member_id = ? WHERE id = ?').run(teamMemberId, userId);
+    }
+  }
+};
+
+// Database operations - Magic Tokens
+export const magicTokenOps = {
+  create: async (email: string, tokenHash: string, expiresAt: Date): Promise<MagicToken> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      const [result] = await getMysqlPool().execute(
+        'INSERT INTO magic_tokens (email, token_hash, expires_at) VALUES (?, ?, ?)',
+        [email.toLowerCase(), tokenHash, expiresAt.toISOString().slice(0, 19).replace('T', ' ')]
+      );
+      const insertResult = result as mysql.ResultSetHeader;
+      return {
+        id: insertResult.insertId,
+        email: email.toLowerCase(),
+        token_hash: tokenHash,
+        expires_at: expiresAt.toISOString(),
+        used: 0,
+        created_at: new Date().toISOString()
+      };
+    } else {
+      const stmt = getSqliteDb().prepare('INSERT INTO magic_tokens (email, token_hash, expires_at) VALUES (?, ?, ?)');
+      const result = stmt.run(email.toLowerCase(), tokenHash, expiresAt.toISOString());
+      return {
+        id: result.lastInsertRowid as number,
+        email: email.toLowerCase(),
+        token_hash: tokenHash,
+        expires_at: expiresAt.toISOString(),
+        used: 0,
+        created_at: new Date().toISOString()
+      };
+    }
+  },
+
+  getByTokenHash: async (tokenHash: string): Promise<MagicToken | undefined> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      const [rows] = await getMysqlPool().execute('SELECT * FROM magic_tokens WHERE token_hash = ?', [tokenHash]);
+      return (rows as MagicToken[])[0];
+    } else {
+      return getSqliteDb().prepare('SELECT * FROM magic_tokens WHERE token_hash = ?').get(tokenHash) as MagicToken | undefined;
+    }
+  },
+
+  markUsed: async (id: number): Promise<void> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      await getMysqlPool().execute('UPDATE magic_tokens SET used = 1 WHERE id = ?', [id]);
+    } else {
+      getSqliteDb().prepare('UPDATE magic_tokens SET used = 1 WHERE id = ?').run(id);
+    }
+  },
+
+  deleteExpired: async (): Promise<void> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      await getMysqlPool().execute('DELETE FROM magic_tokens WHERE expires_at < NOW()');
+    } else {
+      getSqliteDb().prepare('DELETE FROM magic_tokens WHERE expires_at < datetime(\'now\')').run();
+    }
+  }
+};
+
+// Database operations - Sessions
+export const sessionOps = {
+  create: async (userId: number, tokenHash: string, expiresAt: Date): Promise<Session> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      const [result] = await getMysqlPool().execute(
+        'INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)',
+        [userId, tokenHash, expiresAt.toISOString().slice(0, 19).replace('T', ' ')]
+      );
+      const insertResult = result as mysql.ResultSetHeader;
+      return {
+        id: insertResult.insertId,
+        user_id: userId,
+        token_hash: tokenHash,
+        expires_at: expiresAt.toISOString(),
+        created_at: new Date().toISOString()
+      };
+    } else {
+      const stmt = getSqliteDb().prepare('INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)');
+      const result = stmt.run(userId, tokenHash, expiresAt.toISOString());
+      return {
+        id: result.lastInsertRowid as number,
+        user_id: userId,
+        token_hash: tokenHash,
+        expires_at: expiresAt.toISOString(),
+        created_at: new Date().toISOString()
+      };
+    }
+  },
+
+  getByTokenHash: async (tokenHash: string): Promise<(Session & { user: User }) | undefined> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      const [rows] = await getMysqlPool().execute(`
+        SELECT s.*, u.email as user_email, u.name as user_name, u.team_member_id as user_team_member_id, u.created_at as user_created_at
+        FROM sessions s
+        JOIN users u ON s.user_id = u.id
+        WHERE s.token_hash = ? AND s.expires_at > NOW()
+      `, [tokenHash]);
+      const results = rows as (Session & { user_email: string; user_name: string | null; user_team_member_id: number | null; user_created_at: string })[];
+      if (results.length === 0) return undefined;
+      const row = results[0];
+      return {
+        ...row,
+        user: {
+          id: row.user_id,
+          email: row.user_email,
+          name: row.user_name,
+          team_member_id: row.user_team_member_id,
+          created_at: row.user_created_at
+        }
+      };
+    } else {
+      const row = getSqliteDb().prepare(`
+        SELECT s.*, u.email as user_email, u.name as user_name, u.team_member_id as user_team_member_id, u.created_at as user_created_at
+        FROM sessions s
+        JOIN users u ON s.user_id = u.id
+        WHERE s.token_hash = ? AND s.expires_at > datetime('now')
+      `).get(tokenHash) as (Session & { user_email: string; user_name: string | null; user_team_member_id: number | null; user_created_at: string }) | undefined;
+      if (!row) return undefined;
+      return {
+        ...row,
+        user: {
+          id: row.user_id,
+          email: row.user_email,
+          name: row.user_name,
+          team_member_id: row.user_team_member_id,
+          created_at: row.user_created_at
+        }
+      };
+    }
+  },
+
+  delete: async (tokenHash: string): Promise<void> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      await getMysqlPool().execute('DELETE FROM sessions WHERE token_hash = ?', [tokenHash]);
+    } else {
+      getSqliteDb().prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+    }
+  },
+
+  deleteExpired: async (): Promise<void> => {
+    if (useMySQL) {
+      await ensureMysqlInit();
+      await getMysqlPool().execute('DELETE FROM sessions WHERE expires_at < NOW()');
+    } else {
+      getSqliteDb().prepare('DELETE FROM sessions WHERE expires_at < datetime(\'now\')').run();
     }
   }
 };

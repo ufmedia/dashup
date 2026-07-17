@@ -17,20 +17,75 @@ interface Project {
 interface Settings {
   logo_url: string;
   landing_image_url: string;
+  allowed_email_domains: string[];
 }
 
 export default function AdminPage() {
+  const [authenticated, setAuthenticated] = useState(false);
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [settings, setSettings] = useState<Settings>({ logo_url: '', landing_image_url: '' });
+  const [settings, setSettings] = useState<Settings>({ logo_url: '', landing_image_url: '', allowed_email_domains: [] });
   const [newTeamMember, setNewTeamMember] = useState('');
   const [newProject, setNewProject] = useState('');
+  const [newDomain, setNewDomain] = useState('');
   const [editingTeamMember, setEditingTeamMember] = useState<TeamMember | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [logoUrl, setLogoUrl] = useState('');
   const [landingImageUrl, setLandingImageUrl] = useState('');
+  const [emailDomains, setEmailDomains] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // Check if already authenticated via cookie
+  useEffect(() => {
+    // Check for admin cookie by making a test request
+    const checkAuth = async () => {
+      try {
+        const res = await fetch('/api/settings');
+        if (res.ok) {
+          // Check if admin cookie exists (we'll trust the server-side check)
+          const cookies = document.cookie.split(';');
+          const hasAdminCookie = cookies.some(c => c.trim().startsWith('dashup_admin='));
+          if (hasAdminCookie) {
+            setAuthenticated(true);
+          }
+        }
+      } catch {
+        // Not authenticated
+      }
+    };
+    checkAuth();
+  }, []);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+
+    try {
+      const res = await fetch('/api/admin/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+      });
+
+      if (res.ok) {
+        setAuthenticated(true);
+        setPassword('');
+      } else {
+        const data = await res.json();
+        setAuthError(data.error || 'Invalid password');
+      }
+    } catch {
+      setAuthError('Authentication failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
 
   const fetchData = useCallback(async () => {
     try {
@@ -51,6 +106,7 @@ export default function AdminPage() {
         setSettings(settingsData);
         setLogoUrl(settingsData.logo_url || '');
         setLandingImageUrl(settingsData.landing_image_url || '');
+        setEmailDomains(settingsData.allowed_email_domains || []);
       }
     } catch (err) {
       setError('Failed to fetch data');
@@ -59,8 +115,10 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (authenticated) {
+      fetchData();
+    }
+  }, [authenticated, fetchData]);
 
   const showMessage = (msg: string, isError = false) => {
     if (isError) {
@@ -206,7 +264,55 @@ export default function AdminPage() {
     }
   };
 
-  // Settings
+  // Email Domains
+  const addDomain = (e: React.FormEvent) => {
+    e.preventDefault();
+    const domain = newDomain.trim().toLowerCase();
+    if (!domain) return;
+    
+    // Basic domain validation
+    if (!/^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,}$/.test(domain)) {
+      showMessage('Please enter a valid domain (e.g., example.com)', true);
+      return;
+    }
+    
+    if (emailDomains.includes(domain)) {
+      showMessage('This domain is already in the list', true);
+      return;
+    }
+    
+    setEmailDomains([...emailDomains, domain]);
+    setNewDomain('');
+  };
+
+  const removeDomain = (domain: string) => {
+    setEmailDomains(emailDomains.filter(d => d !== domain));
+  };
+
+  const saveEmailDomains = async () => {
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          logo_url: settings.logo_url,
+          landing_image_url: settings.landing_image_url,
+          allowed_email_domains: emailDomains
+        })
+      });
+
+      if (res.ok) {
+        setSettings({ ...settings, allowed_email_domains: emailDomains });
+        showMessage('Email domains saved');
+      } else {
+        showMessage('Failed to save email domains', true);
+      }
+    } catch {
+      showMessage('Failed to save email domains', true);
+    }
+  };
+
+  // Branding Settings
   const saveSettings = async () => {
     try {
       const res = await fetch('/api/settings', {
@@ -214,12 +320,17 @@ export default function AdminPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           logo_url: logoUrl.trim(),
-          landing_image_url: landingImageUrl.trim()
+          landing_image_url: landingImageUrl.trim(),
+          allowed_email_domains: emailDomains
         })
       });
 
       if (res.ok) {
-        setSettings({ logo_url: logoUrl.trim(), landing_image_url: landingImageUrl.trim() });
+        setSettings({ 
+          logo_url: logoUrl.trim(), 
+          landing_image_url: landingImageUrl.trim(),
+          allowed_email_domains: emailDomains
+        });
         showMessage('Branding settings saved');
       } else {
         showMessage('Failed to save settings', true);
@@ -229,6 +340,63 @@ export default function AdminPage() {
     }
   };
 
+  // Show password prompt if not authenticated
+  if (!authenticated) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <div className="mb-8 text-center">
+            <Logo className="mx-auto" />
+          </div>
+          
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+            <h1 className="text-2xl font-light text-gray-800 mb-2 text-center tracking-wide">
+              Settings Access
+            </h1>
+            <p className="text-gray-600 text-center mb-6 font-light">
+              Enter the master password to continue
+            </p>
+
+            {authError && (
+              <div className="mb-6 p-4 bg-rose-50 border border-rose-200 text-rose-900 rounded-xl font-light">
+                {authError}
+              </div>
+            )}
+
+            <form onSubmit={handleAuth} className="space-y-4">
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter master password"
+                autoFocus
+                disabled={authLoading}
+                className="w-full px-5 py-4 border border-gray-200 rounded-xl focus:ring-2 focus:ring-teal-200 focus:border-teal-400 outline-none font-light disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={authLoading || !password}
+                className={`w-full py-4 rounded-xl font-light text-white transition-all ${
+                  authLoading || !password
+                    ? 'bg-gray-300 cursor-not-allowed'
+                    : 'bg-teal-700 hover:bg-teal-800'
+                }`}
+              >
+                {authLoading ? 'Verifying...' : 'Continue'}
+              </button>
+            </form>
+          </div>
+
+          <div className="mt-6 text-center">
+            <a href="/" className="text-gray-500 hover:text-gray-700 font-light text-sm">
+              ← Back to home
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-white py-12 px-4 md:px-8">
       <div className="max-w-5xl mx-auto">
@@ -237,7 +405,7 @@ export default function AdminPage() {
             <Logo />
           </div>
           <h1 className="text-3xl font-light text-gray-800 tracking-wide">Settings</h1>
-          <p className="text-gray-600 mt-3 font-light">Manage your team, projects, and branding</p>
+          <p className="text-gray-600 mt-3 font-light">Manage your team, projects, authentication, and branding</p>
         </div>
 
         {/* Notifications */}
@@ -251,6 +419,59 @@ export default function AdminPage() {
             {success}
           </div>
         )}
+
+        {/* Email Domains Section */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 mb-10">
+          <h2 className="text-lg font-light text-gray-700 mb-2">Allowed Email Domains</h2>
+          <p className="text-gray-500 text-sm font-light mb-6">
+            Users can only sign in with email addresses from these domains
+          </p>
+          
+          <form onSubmit={addDomain} className="mb-6">
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={newDomain}
+                onChange={(e) => setNewDomain(e.target.value)}
+                placeholder="example.com"
+                className="flex-1 px-5 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-teal-200 focus:border-teal-500 outline-none font-light"
+              />
+              <button
+                type="submit"
+                className="px-6 py-3 bg-teal-700 text-white rounded-xl hover:bg-teal-800 transition-colors font-light"
+              >
+                Add
+              </button>
+            </div>
+          </form>
+
+          {emailDomains.length > 0 ? (
+            <div className="space-y-2 mb-6">
+              {emailDomains.map((domain) => (
+                <div key={domain} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
+                  <span className="text-gray-700 font-light">{domain}</span>
+                  <button
+                    onClick={() => removeDomain(domain)}
+                    className="px-4 py-2 text-rose-800 hover:bg-rose-50 rounded-lg transition-colors font-light"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-gray-500 text-center py-6 bg-gray-50 rounded-xl mb-6 font-light">
+              No domains configured. Users won&apos;t be able to sign in until you add at least one domain.
+            </div>
+          )}
+
+          <button
+            onClick={saveEmailDomains}
+            className="px-6 py-3 bg-teal-700 text-white rounded-xl hover:bg-teal-800 transition-colors font-light"
+          >
+            Save Email Domains
+          </button>
+        </div>
 
         {/* Branding Section */}
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 mb-10">

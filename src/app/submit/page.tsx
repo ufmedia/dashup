@@ -26,9 +26,17 @@ interface ExistingSubmission {
   talkTo: { id: number; name: string; priority: string }[];
 }
 
+interface User {
+  id: number;
+  email: string;
+  name: string | null;
+  team_member_id: number | null;
+}
+
 export default function SubmitPage() {
   const router = useRouter();
-  const [currentUser, setCurrentUser] = useState<TeamMember | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [teamMemberId, setTeamMemberId] = useState<number | null>(null);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjects, setSelectedProjects] = useState<number[]>([]);
@@ -47,30 +55,38 @@ export default function SubmitPage() {
   const talkToDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Check for user in localStorage
-    const storedUserId = localStorage.getItem('dashup_user_id');
-    const storedUserName = localStorage.getItem('dashup_user_name');
-    const storedDate = localStorage.getItem('dashup_session_date');
-    const today = new Date().toISOString().split('T')[0];
-
-    // If no user or day rolled over, redirect to home
-    if (!storedUserId || !storedUserName || storedDate !== today) {
-      localStorage.removeItem('dashup_user_id');
-      localStorage.removeItem('dashup_user_name');
-      localStorage.removeItem('dashup_session_date');
-      router.push('/');
-      return;
-    }
-
-    setCurrentUser({ id: parseInt(storedUserId), name: storedUserName });
-
-    // Fetch data
-    const fetchData = async () => {
+    // Check for session-based authentication
+    const checkAuth = async () => {
       try {
+        const res = await fetch('/api/auth/session');
+        const data = await res.json();
+        
+        if (!data.authenticated) {
+          router.push('/');
+          return;
+        }
+        
+        if (!data.user.name) {
+          // Need to complete registration
+          router.push('/auth/register');
+          return;
+        }
+        
+        if (!data.user.team_member_id) {
+          // User doesn't have a linked team member
+          setMessage({ type: 'error', text: 'Your account is not linked to a team member. Please contact an administrator.' });
+          setLoading(false);
+          return;
+        }
+
+        setCurrentUser(data.user);
+        setTeamMemberId(data.user.team_member_id);
+
+        // Fetch data
         const [tmRes, projRes, submissionRes] = await Promise.all([
           fetch('/api/team-members'),
           fetch('/api/projects'),
-          fetch(`/api/submissions/mine?teamMemberId=${storedUserId}`)
+          fetch(`/api/submissions/mine?teamMemberId=${data.user.team_member_id}`)
         ]);
         
         if (tmRes.ok) setTeamMembers(await tmRes.json());
@@ -91,13 +107,14 @@ export default function SubmitPage() {
           }
         }
       } catch (err) {
-        console.error('Failed to fetch data:', err);
+        console.error('Failed to authenticate:', err);
+        router.push('/');
       } finally {
         setLoading(false);
       }
     };
 
-    fetchData();
+    checkAuth();
   }, [router]);
 
   // Close dropdowns when clicking outside
@@ -142,7 +159,7 @@ export default function SubmitPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!currentUser) {
+    if (!teamMemberId) {
       setMessage({ type: 'error', text: 'No user selected' });
       return;
     }
@@ -176,7 +193,7 @@ export default function SubmitPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            teamMemberId: currentUser.id,
+            teamMemberId: teamMemberId,
             projectIds: selectedProjects,
             blockedByText: blockedBy.trim() || null,
             talkToRequests
@@ -217,10 +234,8 @@ export default function SubmitPage() {
       .join(', ');
   };
 
-  const switchUser = () => {
-    localStorage.removeItem('dashup_user_id');
-    localStorage.removeItem('dashup_user_name');
-    localStorage.removeItem('dashup_session_date');
+  const switchUser = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
     router.push('/');
   };
 
@@ -387,7 +402,7 @@ export default function SubmitPage() {
                     <div className="px-5 py-4 text-gray-600 font-light">No team members available</div>
                   ) : (
                     teamMembers
-                      .filter(tm => tm.id !== currentUser.id)
+                      .filter(tm => tm.id !== teamMemberId)
                       .map((tm) => (
                         <label
                           key={tm.id}

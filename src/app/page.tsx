@@ -1,97 +1,113 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Image from 'next/image';
 import Logo from '@/components/Logo';
-
-interface TeamMember {
-  id: number;
-  name: string;
-}
 
 interface Settings {
   logo_url: string;
   landing_image_url: string;
 }
 
-export default function Home() {
+interface User {
+  id: number;
+  email: string;
+  name: string | null;
+  team_member_id: number | null;
+}
+
+function HomeContent() {
   const router = useRouter();
-  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(true);
-  const [savedUser, setSavedUser] = useState<TeamMember | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [selectedMember, setSelectedMember] = useState<TeamMember | null>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [email, setEmail] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [magicLink, setMagicLink] = useState<string | null>(null);
 
   useEffect(() => {
-    // Check for saved user in localStorage
-    const storedUserId = localStorage.getItem('dashup_user_id');
-    const storedUserName = localStorage.getItem('dashup_user_name');
-    const storedDate = localStorage.getItem('dashup_session_date');
-    const today = new Date().toISOString().split('T')[0];
-
-    // Clear session if day has changed
-    if (storedDate && storedDate !== today) {
-      localStorage.removeItem('dashup_user_id');
-      localStorage.removeItem('dashup_user_name');
-      localStorage.removeItem('dashup_session_date');
-    } else if (storedUserId && storedUserName) {
-      setSavedUser({ id: parseInt(storedUserId), name: storedUserName });
+    // Check for error params
+    const error = searchParams.get('error');
+    if (error) {
+      const errorMessages: Record<string, string> = {
+        invalid_token: 'Invalid or expired link. Please request a new one.',
+        expired_token: 'This link has expired. Please request a new one.',
+        used_token: 'This link has already been used. Please request a new one.',
+        verification_failed: 'Verification failed. Please try again.'
+      };
+      setMessage({ type: 'error', text: errorMessages[error] || 'An error occurred.' });
     }
 
-    // Fetch team members and settings
-    Promise.all([
-      fetch('/api/team-members').then(res => res.json()),
-      fetch('/api/settings').then(res => res.json())
-    ])
-      .then(([members, settingsData]) => {
-        setTeamMembers(members);
-        setSettings(settingsData);
+    // Check for existing session
+    fetch('/api/auth/session')
+      .then(res => res.json())
+      .then(data => {
+        if (data.authenticated && data.user.name) {
+          setUser(data.user);
+        } else if (data.authenticated && !data.user.name) {
+          // Need to complete registration
+          router.push('/auth/register');
+          return;
+        }
+        return fetch('/api/settings');
+      })
+      .then(res => res?.json())
+      .then(settingsData => {
+        if (settingsData) {
+          setSettings(settingsData);
+        }
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, []);
+  }, [router, searchParams]);
 
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setDropdownOpen(false);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!email.trim()) {
+      setMessage({ type: 'error', text: 'Please enter your email address' });
+      return;
+    }
+
+    setSubmitting(true);
+    setMessage(null);
+    setMagicLink(null);
+
+    try {
+      const res = await fetch('/api/auth/request-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim() })
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        setMessage({ type: 'success', text: data.message || 'Check your email for the login link!' });
+        // In development, show the magic link
+        if (data.magicLink) {
+          setMagicLink(data.magicLink);
+        }
+      } else {
+        setMessage({ type: 'error', text: data.error || 'Failed to send login link' });
       }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const selectUser = (member: TeamMember) => {
-    const today = new Date().toISOString().split('T')[0];
-    localStorage.setItem('dashup_user_id', member.id.toString());
-    localStorage.setItem('dashup_user_name', member.name);
-    localStorage.setItem('dashup_session_date', today);
-    router.push('/submit');
-  };
-
-  const handleMemberSelect = (member: TeamMember) => {
-    setSelectedMember(member);
-    setDropdownOpen(false);
-  };
-
-  const handleContinue = () => {
-    if (selectedMember) {
-      selectUser(selectedMember);
+    } catch {
+      setMessage({ type: 'error', text: 'Failed to send login link. Please try again.' });
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  const continueAsUser = () => {
-    router.push('/submit');
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    setUser(null);
   };
 
-  const switchUser = () => {
-    localStorage.removeItem('dashup_user_id');
-    localStorage.removeItem('dashup_user_name');
-    setSavedUser(null);
+  const continueToSubmit = () => {
+    router.push('/submit');
   };
 
   if (loading) {
@@ -102,8 +118,8 @@ export default function Home() {
     );
   }
 
-  // If user already selected today, show welcome back screen (split screen)
-  if (savedUser) {
+  // If user is already logged in, show welcome back screen
+  if (user) {
     return (
       <div className="min-h-screen flex">
         {/* Left side - Image */}
@@ -138,7 +154,7 @@ export default function Home() {
             
             <div className="mb-8">
               <h2 className="text-3xl font-light text-gray-800 mb-2 tracking-wide">
-                Welcome back, {savedUser.name}
+                Welcome back, {user.name}
               </h2>
               <p className="text-gray-600 font-light">
                 Ready to share your update for today?
@@ -147,16 +163,16 @@ export default function Home() {
             
             <div className="space-y-4">
               <button
-                onClick={continueAsUser}
+                onClick={continueToSubmit}
                 className="w-full py-4 bg-teal-700 text-white font-light rounded-xl hover:bg-teal-800 transition-all shadow-sm"
               >
                 Continue to my update
               </button>
               <button
-                onClick={switchUser}
+                onClick={handleLogout}
                 className="w-full py-4 text-gray-600 font-light hover:text-gray-800 transition-all"
               >
-                Not {savedUser.name}? Switch user
+                Sign out
               </button>
             </div>
           </div>
@@ -165,7 +181,7 @@ export default function Home() {
     );
   }
 
-  // First time or day rolled over - show split screen user selection
+  // Not logged in - show email login form
   return (
     <div className="min-h-screen flex">
       {/* Left side - Image */}
@@ -191,7 +207,7 @@ export default function Home() {
         )}
       </div>
 
-      {/* Right side - User selection */}
+      {/* Right side - Email login */}
       <div className="w-full lg:w-1/2 flex flex-col items-center justify-center p-8 md:p-16 bg-white">
         <div className="w-full max-w-md">
           <div className="mb-12 text-center lg:text-left">
@@ -200,75 +216,75 @@ export default function Home() {
           
           <div className="mb-8">
             <h2 className="text-3xl font-light text-gray-800 mb-2 tracking-wide">
-              Good to see you
+              Welcome
             </h2>
             <p className="text-gray-600 font-light">
-              Who are you?
+              Enter your email to receive a login link
             </p>
           </div>
 
-          {teamMembers.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-gray-600 mb-6 font-light">No team members yet.</p>
-              <a
-                href="/admin"
-                className="inline-block px-6 py-3 bg-teal-700 text-white font-light rounded-xl hover:bg-teal-800 transition-all"
-              >
-                Add team members in Settings
-              </a>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              {/* Dropdown for name selection */}
-              <div ref={dropdownRef} className="relative">
-                <button
-                  type="button"
-                  onClick={() => setDropdownOpen(!dropdownOpen)}
-                  className="w-full px-5 py-4 border border-gray-200 rounded-xl focus:ring-2 focus:ring-teal-200 focus:border-teal-400 outline-none bg-white text-left flex justify-between items-center"
-                >
-                  <span className={`font-light text-lg ${selectedMember ? 'text-gray-800' : 'text-gray-400'}`}>
-                    {selectedMember ? selectedMember.name : 'Select your name...'}
-                  </span>
-                  <svg className={`w-5 h-5 text-gray-400 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                
-                {dropdownOpen && (
-                  <div className="absolute z-10 w-full mt-2 bg-white border border-gray-200 rounded-xl shadow-lg max-h-64 overflow-auto">
-                    {teamMembers.map((member) => (
-                      <button
-                        key={member.id}
-                        type="button"
-                        onClick={() => handleMemberSelect(member)}
-                        className={`w-full px-5 py-4 text-left hover:bg-teal-50 font-light text-gray-700 transition-colors ${
-                          selectedMember?.id === member.id ? 'bg-teal-50 text-teal-800' : ''
-                        }`}
-                      >
-                        {member.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Continue button */}
-              <button
-                onClick={handleContinue}
-                disabled={!selectedMember}
-                className={`w-full py-4 rounded-xl font-light text-white transition-all ${
-                  selectedMember
-                    ? 'bg-teal-700 hover:bg-teal-800 active:scale-[0.99]'
-                    : 'bg-gray-300 cursor-not-allowed'
-                }`}
-              >
-                Continue
-              </button>
+          {message && (
+            <div className={`mb-6 p-4 rounded-xl font-light ${
+              message.type === 'success' 
+                ? 'bg-teal-50 border border-teal-200 text-teal-900'
+                : 'bg-rose-50 border border-rose-200 text-rose-900'
+            }`}>
+              {message.text}
             </div>
           )}
 
+          {/* Development mode: Show magic link for testing */}
+          {magicLink && (
+            <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+              <p className="text-amber-900 text-sm font-light mb-2">Development mode - Magic link:</p>
+              <a 
+                href={magicLink} 
+                className="text-amber-800 underline break-all text-sm"
+              >
+                Click here to sign in
+              </a>
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Enter your email address"
+                autoFocus
+                disabled={submitting}
+                className="w-full px-5 py-4 border border-gray-200 rounded-xl focus:ring-2 focus:ring-teal-200 focus:border-teal-400 outline-none font-light text-lg disabled:opacity-50"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={submitting || !email.trim()}
+              className={`w-full py-4 rounded-xl font-light text-white transition-all ${
+                submitting || !email.trim()
+                  ? 'bg-gray-300 cursor-not-allowed'
+                  : 'bg-teal-700 hover:bg-teal-800 active:scale-[0.99]'
+              }`}
+            >
+              {submitting ? 'Sending...' : 'Send login link'}
+            </button>
+          </form>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <div className="text-gray-600 text-xl font-light">Loading...</div>
+      </div>
+    }>
+      <HomeContent />
+    </Suspense>
   );
 }
