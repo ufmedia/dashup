@@ -30,7 +30,16 @@ export interface SendEmailOptions {
 export async function sendEmail(options: SendEmailOptions): Promise<boolean> {
   const client = getMailgunClient();
   const domain = process.env.MAILGUN_DOMAIN;
-  const from = process.env.MAILGUN_FROM || `DashUp <noreply@${domain}>`;
+  const appName = process.env.NEXT_PUBLIC_APP_NAME || 'Dashuply';
+  
+  // Build from address with display name
+  let from = process.env.MAILGUN_FROM;
+  if (!from) {
+    from = `${appName} <noreply@${domain}>`;
+  } else if (!from.includes('<')) {
+    // If MAILGUN_FROM is just an email, wrap it with the app name
+    from = `${appName} <${from}>`;
+  }
   
   if (!client || !domain) {
     console.warn('Mailgun not configured - email not sent');
