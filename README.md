@@ -44,6 +44,11 @@ Open [http://localhost:3000](http://localhost:3000) to see the app.
 |----------|-------------|----------|
 | `DASHUP_MASTER_PASSWORD` | Master password for accessing /admin settings page | Yes |
 | `NEXT_PUBLIC_BASE_URL` | Base URL for magic links (e.g., https://dashup.example.com) | Production only |
+| `MAILGUN_API_KEY` | Mailgun API key | Yes (for email) |
+| `MAILGUN_DOMAIN` | Mailgun sending domain (e.g., mg.example.com) | Yes (for email) |
+| `MAILGUN_FROM` | From address (default: noreply@{domain}) | No |
+| `MAILGUN_EU` | Set to "true" for EU Mailgun endpoint | No |
+| `NEXT_PUBLIC_APP_NAME` | App name shown in emails (default: DashUp) | No |
 | `MYSQL_HOST` | MySQL host (if using MySQL instead of SQLite) | No |
 | `MYSQL_PORT` | MySQL port (default: 3306) | No |
 | `MYSQL_USER` | MySQL username | No |
@@ -56,7 +61,7 @@ DashUp uses magic link authentication:
 
 1. **Email Login**: Users enter their email on the landing page
 2. **Domain Validation**: Email domain must be in the allowed list (configured in /admin)
-3. **Magic Link**: A secure login link is sent (in development, shown in console)
+3. **Magic Link**: A secure login link is sent via Mailgun
 4. **Registration**: First-time users are prompted to enter their name
 5. **Sessions**: Login sessions last 7 days
 

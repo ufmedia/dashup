@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { settingsOps, userOps, magicTokenOps } from '@/lib/db';
 import { generateToken, hashToken, isValidEmail, isDomainAllowed, TOKEN_EXPIRY_MINUTES, generateMagicLink } from '@/lib/auth';
+import { sendMagicLinkEmail } from '@/lib/email';
 
 export async function POST(request: Request) {
   try {
@@ -40,24 +41,23 @@ export async function POST(request: Request) {
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || new URL(request.url).origin;
     const magicLink = generateMagicLink(baseUrl, token);
 
-    // In production, send email here
-    // For development, log the link
-    console.log('=================================');
-    console.log('Magic link for', email);
-    console.log(magicLink);
-    console.log('Expires in', TOKEN_EXPIRY_MINUTES, 'minutes');
-    console.log('=================================');
-
-    // TODO: Implement email sending
-    // await sendEmail({
-    //   to: email,
-    //   subject: 'Your login link for Dashup',
-    //   body: `Click here to log in: ${magicLink}\n\nThis link expires in ${TOKEN_EXPIRY_MINUTES} minutes.`
-    // });
+    // Send the magic link email
+    const emailSent = await sendMagicLinkEmail(email, magicLink, TOKEN_EXPIRY_MINUTES);
+    
+    // Log for debugging (always helpful in production logs)
+    console.log(`Magic link requested for ${email}, email sent: ${emailSent}`);
+    
+    // In development, also show the link directly
+    if (process.env.NODE_ENV === 'development') {
+      console.log('=================================');
+      console.log('Magic link for', email);
+      console.log(magicLink);
+      console.log('=================================');
+    }
 
     return NextResponse.json({ 
       success: true, 
-      message: 'Magic link sent! Check your email.',
+      message: emailSent ? 'Magic link sent! Check your email.' : 'Magic link generated (check server logs if email not configured).',
       // Only include link in development for testing
       ...(process.env.NODE_ENV === 'development' && { magicLink })
     });
