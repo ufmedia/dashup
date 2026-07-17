@@ -49,5 +49,5 @@ export const SESSION_COOKIE_NAME = 'dashup_session';
 
 // Generate magic link URL
 export function generateMagicLink(baseUrl: string, token: string): string {
-  return `${baseUrl}/auth/verify?token=${token}`;
+  return `${baseUrl}/api/auth/verify?token=${token}`;
 }
